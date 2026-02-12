@@ -11,3 +11,7 @@ This repository contains the implementation of the PageRank algorithm for CS528 
 ```bash
 python hw2.py
 python test_hw2.py
+
+Environment：
+Python 3.10+
+google-cloud-storage
