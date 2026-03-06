@@ -27,7 +27,7 @@ popd
 - Topic: `hw3-forbidden-topic`
 - Subscription: `hw3-sub`
 
-You can override with environment variables, e.g.:
+Can override with environment variables, e.g.:
 
 ```bash
 export REGION=us-central1
@@ -42,3 +42,4 @@ bash setup.sh
 - Startup scripts include run-once lock files:
   - `/var/log/startup_already_done_hw4_server`
   - `/var/log/startup_already_done_hw4_forbidden`
+
