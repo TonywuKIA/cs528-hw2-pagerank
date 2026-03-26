@@ -47,18 +47,22 @@ def ensure_database_exists() -> None:
     )
     admin_conn.autocommit = True
     db_name = os.environ["DB_NAME"]
-    with admin_conn.cursor() as cursor:
+    cursor = admin_conn.cursor()
+    try:
         cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db_name,))
         exists = cursor.fetchone()
         if not exists:
             cursor.execute(f'CREATE DATABASE "{db_name}"')
+    finally:
+        cursor.close()
     admin_conn.close()
 
 
 def main() -> int:
     ensure_database_exists()
     with get_connection() as conn:
-        with conn.cursor() as cursor:
+        cursor = conn.cursor()
+        try:
             cursor.execute(SCHEMA_SQL)
             cursor.execute(
                 """
@@ -67,7 +71,9 @@ def main() -> int:
                 USING age::TEXT
                 """
             )
-        conn.commit()
+            conn.commit()
+        finally:
+            cursor.close()
     print("Schema setup complete", flush=True)
     return 0
 

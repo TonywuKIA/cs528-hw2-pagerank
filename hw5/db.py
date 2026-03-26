@@ -70,9 +70,12 @@ def insert_request_record(record: dict[str, Any]) -> None:
         record["status_code"],
     )
     with get_connection() as conn:
-        with conn.cursor() as cursor:
+        cursor = conn.cursor()
+        try:
             cursor.execute(query, values)
-        conn.commit()
+            conn.commit()
+        finally:
+            cursor.close()
 
 
 def insert_error_record(record: dict[str, Any]) -> None:
@@ -82,20 +85,29 @@ def insert_error_record(record: dict[str, Any]) -> None:
     """
     values = (record["request_ts"], record.get("requested_file"), record["error_code"])
     with get_connection() as conn:
-        with conn.cursor() as cursor:
+        cursor = conn.cursor()
+        try:
             cursor.execute(query, values)
-        conn.commit()
+            conn.commit()
+        finally:
+            cursor.close()
 
 
 def fetch_one(query: str, params: Iterable[Any] = ()) -> Any:
     with get_connection() as conn:
-        with conn.cursor() as cursor:
+        cursor = conn.cursor()
+        try:
             cursor.execute(query, tuple(params))
             return cursor.fetchone()
+        finally:
+            cursor.close()
 
 
 def fetch_all(query: str, params: Iterable[Any] = ()) -> list[tuple[Any, ...]]:
     with get_connection() as conn:
-        with conn.cursor() as cursor:
+        cursor = conn.cursor()
+        try:
             cursor.execute(query, tuple(params))
             return list(cursor.fetchall())
+        finally:
+            cursor.close()
