@@ -16,7 +16,7 @@ LOG_OBJECT="${LOG_OBJECT:-forbidden/forbidden_requests.log}"
 
 SERVER_VM="${SERVER_VM:-hw5-server-vm}"
 FORBIDDEN_VM="${FORBIDDEN_VM:-hw5-forbidden-vm}"
-SERVER_MACHINE_TYPE="${SERVER_MACHINE_TYPE:-e2-medium}"
+SERVER_MACHINE_TYPE="${SERVER_MACHINE_TYPE:-e2-standard-4}"
 FORBIDDEN_MACHINE_TYPE="${FORBIDDEN_MACHINE_TYPE:-e2-micro}"
 
 SERVER_SA_NAME="${SERVER_SA_NAME:-hw5-server-sa}"
