@@ -23,6 +23,7 @@ BUCKET_NAME="$(fetch_metadata BUCKET_NAME)"
 TOPIC_ID="$(fetch_metadata TOPIC_ID)"
 BUILD_ID="$(fetch_metadata BUILD_ID)"
 DB_INSTANCE_CONNECTION_NAME="$(fetch_metadata DB_INSTANCE_CONNECTION_NAME)"
+DB_HOST="$(fetch_metadata DB_HOST)"
 DB_NAME="$(fetch_metadata DB_NAME)"
 DB_USER="$(fetch_metadata DB_USER)"
 DB_PASS="$(fetch_metadata DB_PASS)"
@@ -49,6 +50,8 @@ Environment=TOPIC_ID=${TOPIC_ID}
 Environment=BUILD_ID=${BUILD_ID}
 Environment=PORT=80
 Environment=DB_INSTANCE_CONNECTION_NAME=${DB_INSTANCE_CONNECTION_NAME}
+Environment=DB_HOST=${DB_HOST}
+Environment=DB_PORT=5432
 Environment=DB_NAME=${DB_NAME}
 Environment=DB_USER=${DB_USER}
 Environment=DB_PASS=${DB_PASS}

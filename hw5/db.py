@@ -3,12 +3,15 @@ from collections.abc import Iterable
 from typing import Any
 
 from google.cloud.sql.connector import Connector, IPTypes
+import pg8000
 
 
 DB_INSTANCE_CONNECTION_NAME = os.environ["DB_INSTANCE_CONNECTION_NAME"]
 DB_NAME = os.environ["DB_NAME"]
 DB_USER = os.environ["DB_USER"]
 DB_PASS = os.environ["DB_PASS"]
+DB_HOST = os.environ.get("DB_HOST", "").strip()
+DB_PORT = int(os.environ.get("DB_PORT", "5432"))
 
 
 _connector: Connector | None = None
@@ -22,6 +25,14 @@ def _get_connector() -> Connector:
 
 
 def get_connection():
+    if DB_HOST:
+        return pg8000.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            database=DB_NAME,
+            user=DB_USER,
+            password=DB_PASS,
+        )
     connector = _get_connector()
     return connector.connect(
         DB_INSTANCE_CONNECTION_NAME,

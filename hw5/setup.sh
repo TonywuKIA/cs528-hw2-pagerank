@@ -184,6 +184,10 @@ fi
 
 if gcloud compute instances describe "${SERVER_VM}" --zone="${ZONE}" >/dev/null 2>&1; then
   echo "[setup] VM exists: ${SERVER_VM}"
+  gcloud compute instances add-metadata "${SERVER_VM}" \
+    --zone="${ZONE}" \
+    --metadata="BUCKET_NAME=${BUCKET_NAME},TOPIC_ID=${TOPIC_ID},BUILD_ID=hw5-vm,DB_INSTANCE_CONNECTION_NAME=${DB_CONN_NAME},DB_HOST=${DB_HOST},DB_NAME=${DB_NAME},DB_USER=${DB_USER},DB_PASS=${DB_PASS}" \
+    --metadata-from-file="startup-script=${SCRIPT_DIR}/startup.sh,APP_DB_PY=${SCRIPT_DIR}/db.py,APP_SERVICE1_PY=${SCRIPT_DIR}/service1_server.py,APP_QUERY_STATS_PY=${SCRIPT_DIR}/query_stats.py" >/dev/null
 else
   gcloud compute instances create "${SERVER_VM}" \
     --zone="${ZONE}" \
@@ -194,12 +198,16 @@ else
     --scopes="https://www.googleapis.com/auth/cloud-platform" \
     --address="${SERVER_IP}" \
     --tags="hw5-server" \
-    --metadata="BUCKET_NAME=${BUCKET_NAME},TOPIC_ID=${TOPIC_ID},BUILD_ID=hw5-vm,DB_INSTANCE_CONNECTION_NAME=${DB_CONN_NAME},DB_NAME=${DB_NAME},DB_USER=${DB_USER},DB_PASS=${DB_PASS}" \
+    --metadata="BUCKET_NAME=${BUCKET_NAME},TOPIC_ID=${TOPIC_ID},BUILD_ID=hw5-vm,DB_INSTANCE_CONNECTION_NAME=${DB_CONN_NAME},DB_HOST=${DB_HOST},DB_NAME=${DB_NAME},DB_USER=${DB_USER},DB_PASS=${DB_PASS}" \
     --metadata-from-file="startup-script=${SCRIPT_DIR}/startup.sh,APP_DB_PY=${SCRIPT_DIR}/db.py,APP_SERVICE1_PY=${SCRIPT_DIR}/service1_server.py,APP_QUERY_STATS_PY=${SCRIPT_DIR}/query_stats.py" >/dev/null
 fi
 
 if gcloud compute instances describe "${FORBIDDEN_VM}" --zone="${ZONE}" >/dev/null 2>&1; then
   echo "[setup] VM exists: ${FORBIDDEN_VM}"
+  gcloud compute instances add-metadata "${FORBIDDEN_VM}" \
+    --zone="${ZONE}" \
+    --metadata="SUBSCRIPTION_ID=${SUBSCRIPTION_ID},BUCKET_NAME=${BUCKET_NAME},LOG_OBJECT=${LOG_OBJECT}" \
+    --metadata-from-file="startup-script=${SCRIPT_DIR}/startup_forbidden.sh,APP_SERVICE2_PY=${SCRIPT_DIR}/service2_subscriber.py" >/dev/null
 else
   gcloud compute instances create "${FORBIDDEN_VM}" \
     --zone="${ZONE}" \
