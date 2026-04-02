@@ -4,7 +4,7 @@ from pathlib import Path
 
 from google.cloud import storage
 from sklearn.feature_extraction import DictVectorizer
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import SGDClassifier
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
@@ -15,11 +15,17 @@ from db import fetch_all
 BUCKET_NAME = os.environ["BUCKET_NAME"]
 OUTPUT_PREFIX = os.environ.get("OUTPUT_PREFIX", "hw6")
 RANDOM_STATE = int(os.environ.get("MODEL_RANDOM_STATE", "42"))
-MAX_INCOME_TRAIN_ROWS = int(os.environ.get("MAX_INCOME_TRAIN_ROWS", "30000"))
-MAX_INCOME_TEST_ROWS = int(os.environ.get("MAX_INCOME_TEST_ROWS", "10000"))
+MAX_INCOME_TRAIN_ROWS = int(os.environ.get("MAX_INCOME_TRAIN_ROWS", "15000"))
+MAX_INCOME_TEST_ROWS = int(os.environ.get("MAX_INCOME_TEST_ROWS", "5000"))
+
+
+def log_progress(message: str, **kwargs) -> None:
+    payload = {"message": message, **kwargs}
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 def fetch_joined_requests() -> list[dict[str, object]]:
+    log_progress("fetch_joined_requests_start")
     rows = fetch_all(
         """
         SELECT
@@ -62,6 +68,7 @@ def fetch_joined_requests() -> list[dict[str, object]]:
                 "ip_prefix_24": extract_ip_prefix(client_ip),
             }
         )
+    log_progress("fetch_joined_requests_done", row_count=len(result))
     return result
 
 
@@ -89,9 +96,11 @@ def split_rows(rows: list[dict[str, object]], target_key: str) -> tuple[list[dic
 
 
 def upload_text(blob_name: str, content: str) -> None:
+    log_progress("upload_start", blob_name=blob_name, byte_count=len(content.encode("utf-8")))
     client = storage.Client()
     bucket = client.bucket(BUCKET_NAME)
     bucket.blob(blob_name).upload_from_string(content, content_type="application/json")
+    log_progress("upload_done", blob_name=blob_name)
 
 
 def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
@@ -100,6 +109,7 @@ def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
 
 
 def run_ip_country_model(rows: list[dict[str, object]], output_dir: Path) -> dict[str, object]:
+    log_progress("ip_country_model_start")
     train_rows, test_rows = split_rows(rows, "country")
     ip_country_lookup = {
         str(row["client_ip"]): str(row["country"])
@@ -132,17 +142,18 @@ def run_ip_country_model(rows: list[dict[str, object]], output_dir: Path) -> dic
     output_path = output_dir / "ip_country_test_predictions.jsonl"
     write_jsonl(output_path, predictions)
     upload_text(f"{OUTPUT_PREFIX}/ip_country_test_predictions.jsonl", output_path.read_text(encoding="utf-8"))
-    return {
+    metrics = {
         "model_name": "lookup_by_client_ip",
         "test_rows": len(test_rows),
         "accuracy": accuracy_score(actual, predicted),
         "output_blob": f"{OUTPUT_PREFIX}/ip_country_test_predictions.jsonl",
     }
+    log_progress("ip_country_model_done", **metrics)
+    return metrics
 
 
 def build_income_features(row: dict[str, object]) -> dict[str, str]:
     feature_names = [
-        "client_ip",
         "ip_prefix_24",
         "country",
         "gender",
@@ -161,7 +172,12 @@ def build_income_features(row: dict[str, object]) -> dict[str, str]:
 
 
 def build_income_pipeline() -> Pipeline:
-    classifier = LogisticRegression(max_iter=2000)
+    classifier = SGDClassifier(
+        loss="log_loss",
+        max_iter=1000,
+        tol=1e-3,
+        random_state=RANDOM_STATE,
+    )
     return Pipeline(steps=[("vectorizer", DictVectorizer(sparse=True)), ("classifier", classifier)])
 
 
@@ -186,19 +202,31 @@ def cap_rows(rows: list[dict[str, object]], limit: int, key: str) -> list[dict[s
 
 
 def run_income_model(rows: list[dict[str, object]], output_dir: Path) -> dict[str, object]:
+    log_progress("income_model_start")
     train_rows, test_rows = split_rows(rows, "income")
+    log_progress("income_model_split_done", train_rows=len(train_rows), test_rows=len(test_rows))
     train_rows = cap_rows(train_rows, MAX_INCOME_TRAIN_ROWS, "income")
     test_rows = cap_rows(test_rows, MAX_INCOME_TEST_ROWS, "income")
+    log_progress(
+        "income_model_capped",
+        train_rows=len(train_rows),
+        test_rows=len(test_rows),
+        max_train_rows=MAX_INCOME_TRAIN_ROWS,
+        max_test_rows=MAX_INCOME_TEST_ROWS,
+    )
     unique_incomes = sorted({str(row["income"]) for row in train_rows})
     if len(unique_incomes) == 1:
         constant_income = unique_incomes[0]
         predicted = [constant_income for _ in test_rows]
         best_model_name = "constant_income_baseline"
     else:
-        best_model_name = "logistic_regression_sparse_sampled"
+        best_model_name = "sgd_log_loss_sparse_sampled"
         model = build_income_pipeline()
+        log_progress("income_model_fit_start", model_name=best_model_name)
         model.fit([build_income_features(row) for row in train_rows], [str(row["income"]) for row in train_rows])
+        log_progress("income_model_fit_done", model_name=best_model_name)
         predicted = [str(label) for label in model.predict([build_income_features(row) for row in test_rows])]
+        log_progress("income_model_predict_done", model_name=best_model_name)
     actual = [str(row["income"]) for row in test_rows]
 
     predictions = []
@@ -219,17 +247,20 @@ def run_income_model(rows: list[dict[str, object]], output_dir: Path) -> dict[st
     output_path = output_dir / "income_test_predictions.jsonl"
     write_jsonl(output_path, predictions)
     upload_text(f"{OUTPUT_PREFIX}/income_test_predictions.jsonl", output_path.read_text(encoding="utf-8"))
-    return {
+    metrics = {
         "model_name": best_model_name,
         "test_rows": len(test_rows),
         "accuracy": accuracy_score(actual, predicted),
         "output_blob": f"{OUTPUT_PREFIX}/income_test_predictions.jsonl",
     }
+    log_progress("income_model_done", **metrics)
+    return metrics
 
 
 def main() -> int:
     output_dir = Path(os.environ.get("LOCAL_OUTPUT_DIR", "/tmp/hw6-output"))
     output_dir.mkdir(parents=True, exist_ok=True)
+    log_progress("run_models_start", output_dir=str(output_dir))
 
     rows = fetch_joined_requests()
     if not rows:
@@ -247,6 +278,7 @@ def main() -> int:
     metrics_path = output_dir / "model_metrics.json"
     metrics_path.write_text(metrics_payload + "\n", encoding="utf-8")
     upload_text(f"{OUTPUT_PREFIX}/model_metrics.json", metrics_payload + "\n")
+    log_progress("run_models_done", row_count=len(rows))
     print(metrics_payload, flush=True)
     return 0
 
