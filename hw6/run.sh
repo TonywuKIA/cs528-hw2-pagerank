@@ -20,6 +20,24 @@ MODEL_SA_NAME="${MODEL_SA_NAME:-hw6-model-sa}"
 MODEL_SA_EMAIL="${MODEL_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 OUTPUT_PREFIX="${OUTPUT_PREFIX:-hw6}"
 
+run_ssh_with_retry() {
+  local remote_command="$1"
+  local attempts="${2:-12}"
+  local sleep_seconds="${3:-10}"
+  local attempt
+
+  for attempt in $(seq 1 "${attempts}"); do
+    if gcloud compute ssh "${MODEL_VM}" --zone="${ZONE}" --command="${remote_command}"; then
+      return 0
+    fi
+    echo "[run] SSH attempt ${attempt}/${attempts} failed; retrying in ${sleep_seconds}s..."
+    sleep "${sleep_seconds}"
+  done
+
+  echo "[run] SSH failed after ${attempts} attempts." >&2
+  return 1
+}
+
 cleanup() {
   set +e
   if gcloud compute instances describe "${MODEL_VM}" --zone="${ZONE}" >/dev/null 2>&1; then
@@ -76,13 +94,13 @@ gcloud compute instances create "${MODEL_VM}" \
   --metadata-from-file="startup-script=${SCRIPT_DIR}/startup.sh,APP_DB_PY=${SCRIPT_DIR}/db.py,APP_SETUP_3NF_PY=${SCRIPT_DIR}/setup_3nf.py,APP_MIGRATE_PY=${SCRIPT_DIR}/migrate_to_3nf.py,APP_RUN_MODELS_PY=${SCRIPT_DIR}/run_models.py" >/dev/null
 
 echo "[run] Waiting for VM bootstrap to finish..."
-gcloud compute ssh "${MODEL_VM}" --zone="${ZONE}" --command="while [ ! -x /opt/hw6/venv/bin/python ]; do sleep 5; done"
+run_ssh_with_retry "while [ ! -x /opt/hw6/venv/bin/python ]; do sleep 5; done" 18 10
 
 echo "[run] Applying 3NF schema and migrating data..."
-gcloud compute ssh "${MODEL_VM}" --zone="${ZONE}" --command="cd /opt/hw6/app && export DB_HOST='${DB_HOST}' DB_PORT='${DB_PORT}' DB_NAME='${DB_NAME}' DB_USER='${DB_USER}' DB_PASS='${DB_PASS}' && /opt/hw6/venv/bin/python setup_3nf.py && /opt/hw6/venv/bin/python migrate_to_3nf.py"
+run_ssh_with_retry "cd /opt/hw6/app && export DB_HOST='${DB_HOST}' DB_PORT='${DB_PORT}' DB_NAME='${DB_NAME}' DB_USER='${DB_USER}' DB_PASS='${DB_PASS}' && /opt/hw6/venv/bin/python setup_3nf.py && /opt/hw6/venv/bin/python migrate_to_3nf.py" 6 10
 
 echo "[run] Training and evaluating models..."
-gcloud compute ssh "${MODEL_VM}" --zone="${ZONE}" --command="cd /opt/hw6/app && export BUCKET_NAME='${BUCKET_NAME}' OUTPUT_PREFIX='${OUTPUT_PREFIX}' DB_HOST='${DB_HOST}' DB_PORT='${DB_PORT}' DB_NAME='${DB_NAME}' DB_USER='${DB_USER}' DB_PASS='${DB_PASS}' && /opt/hw6/venv/bin/python run_models.py"
+run_ssh_with_retry "cd /opt/hw6/app && export BUCKET_NAME='${BUCKET_NAME}' OUTPUT_PREFIX='${OUTPUT_PREFIX}' DB_HOST='${DB_HOST}' DB_PORT='${DB_PORT}' DB_NAME='${DB_NAME}' DB_USER='${DB_USER}' DB_PASS='${DB_PASS}' && /opt/hw6/venv/bin/python run_models.py" 6 10
 
 echo "[output] Metrics file:"
 gcloud storage cat "gs://${BUCKET_NAME}/${OUTPUT_PREFIX}/model_metrics.json"
