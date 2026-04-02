@@ -15,6 +15,7 @@ from db import fetch_all
 BUCKET_NAME = os.environ["BUCKET_NAME"]
 OUTPUT_PREFIX = os.environ.get("OUTPUT_PREFIX", "hw6")
 RANDOM_STATE = int(os.environ.get("MODEL_RANDOM_STATE", "42"))
+MAX_IP_COUNTRY_TEST_ROWS = int(os.environ.get("MAX_IP_COUNTRY_TEST_ROWS", "5000"))
 MAX_INCOME_TRAIN_ROWS = int(os.environ.get("MAX_INCOME_TRAIN_ROWS", "15000"))
 MAX_INCOME_TEST_ROWS = int(os.environ.get("MAX_INCOME_TEST_ROWS", "5000"))
 
@@ -111,11 +112,16 @@ def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
 def run_ip_country_model(rows: list[dict[str, object]], output_dir: Path) -> dict[str, object]:
     log_progress("ip_country_model_start")
     train_rows, test_rows = split_rows(rows, "country")
+    log_progress("ip_country_model_split_done", train_rows=len(train_rows), test_rows=len(test_rows))
+    test_rows = cap_rows(test_rows, MAX_IP_COUNTRY_TEST_ROWS, "country")
+    log_progress("ip_country_model_capped", test_rows=len(test_rows), max_test_rows=MAX_IP_COUNTRY_TEST_ROWS)
+    log_progress("ip_country_lookup_build_start")
     ip_country_lookup = {
         str(row["client_ip"]): str(row["country"])
         for row in rows
         if row.get("client_ip") and row.get("country")
     }
+    log_progress("ip_country_lookup_build_done", lookup_size=len(ip_country_lookup))
     fallback_country = max(
         (str(row["country"]) for row in train_rows if row.get("country")),
         key=lambda country: sum(1 for row in train_rows if row.get("country") == country),
@@ -124,6 +130,7 @@ def run_ip_country_model(rows: list[dict[str, object]], output_dir: Path) -> dic
     predictions = []
     actual = []
     predicted = []
+    log_progress("ip_country_prediction_loop_start", test_rows=len(test_rows))
     for row in test_rows:
         predicted_country = ip_country_lookup.get(str(row["client_ip"]), fallback_country)
         actual_country = str(row["country"])
@@ -138,9 +145,11 @@ def run_ip_country_model(rows: list[dict[str, object]], output_dir: Path) -> dic
                 "correct": actual_country == predicted_country,
             }
         )
+    log_progress("ip_country_prediction_loop_done", prediction_rows=len(predictions))
 
     output_path = output_dir / "ip_country_test_predictions.jsonl"
     write_jsonl(output_path, predictions)
+    log_progress("ip_country_write_done", output_path=str(output_path))
     upload_text(f"{OUTPUT_PREFIX}/ip_country_test_predictions.jsonl", output_path.read_text(encoding="utf-8"))
     metrics = {
         "model_name": "lookup_by_client_ip",
