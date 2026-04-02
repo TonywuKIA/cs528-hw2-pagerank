@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 
 from google.cloud import storage
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
@@ -16,6 +15,8 @@ from db import fetch_all
 BUCKET_NAME = os.environ["BUCKET_NAME"]
 OUTPUT_PREFIX = os.environ.get("OUTPUT_PREFIX", "hw6")
 RANDOM_STATE = int(os.environ.get("MODEL_RANDOM_STATE", "42"))
+MAX_INCOME_TRAIN_ROWS = int(os.environ.get("MAX_INCOME_TRAIN_ROWS", "30000"))
+MAX_INCOME_TEST_ROWS = int(os.environ.get("MAX_INCOME_TEST_ROWS", "10000"))
 
 
 def fetch_joined_requests() -> list[dict[str, object]]:
@@ -159,37 +160,9 @@ def build_income_features(row: dict[str, object]) -> dict[str, str]:
     return features
 
 
-def build_income_pipeline(model_name: str):
-    if model_name == "logistic_regression":
-        classifier = LogisticRegression(max_iter=2000)
-    elif model_name == "random_forest":
-        classifier = RandomForestClassifier(
-            n_estimators=300,
-            random_state=RANDOM_STATE,
-            class_weight="balanced_subsample",
-            min_samples_leaf=2,
-        )
-    else:
-        raise ValueError(f"Unknown model: {model_name}")
-    return Pipeline(steps=[("vectorizer", DictVectorizer(sparse=False)), ("classifier", classifier)])
-
-
-def score_candidate_model(model_name: str, train_rows: list[dict[str, object]]) -> float:
-    if len(train_rows) < 10:
-        return 0.0
-    if len({str(row["income"]) for row in train_rows}) <= 1:
-        return 1.0
-    train_subset, validation_rows = train_test_split(
-        train_rows,
-        test_size=0.25,
-        random_state=RANDOM_STATE,
-        stratify=[str(row["income"]) for row in train_rows] if _can_stratify(train_rows, "income") else None,
-    )
-    model = build_income_pipeline(model_name)
-    model.fit([build_income_features(row) for row in train_subset], [str(row["income"]) for row in train_subset])
-    predictions = model.predict([build_income_features(row) for row in validation_rows])
-    actual = [str(row["income"]) for row in validation_rows]
-    return float(accuracy_score(actual, predictions))
+def build_income_pipeline() -> Pipeline:
+    classifier = LogisticRegression(max_iter=2000)
+    return Pipeline(steps=[("vectorizer", DictVectorizer(sparse=True)), ("classifier", classifier)])
 
 
 def _can_stratify(rows: list[dict[str, object]], key: str) -> bool:
@@ -199,17 +172,31 @@ def _can_stratify(rows: list[dict[str, object]], key: str) -> bool:
     return min(labels.count(label) for label in set(labels)) >= 2
 
 
+def cap_rows(rows: list[dict[str, object]], limit: int, key: str) -> list[dict[str, object]]:
+    if len(rows) <= limit:
+        return rows
+    labels = [str(row[key]) for row in rows]
+    capped, _ = train_test_split(
+        rows,
+        train_size=limit,
+        random_state=RANDOM_STATE,
+        stratify=labels if _can_stratify(rows, key) else None,
+    )
+    return capped
+
+
 def run_income_model(rows: list[dict[str, object]], output_dir: Path) -> dict[str, object]:
     train_rows, test_rows = split_rows(rows, "income")
+    train_rows = cap_rows(train_rows, MAX_INCOME_TRAIN_ROWS, "income")
+    test_rows = cap_rows(test_rows, MAX_INCOME_TEST_ROWS, "income")
     unique_incomes = sorted({str(row["income"]) for row in train_rows})
     if len(unique_incomes) == 1:
         constant_income = unique_incomes[0]
         predicted = [constant_income for _ in test_rows]
         best_model_name = "constant_income_baseline"
     else:
-        candidate_models = ["logistic_regression", "random_forest"]
-        best_model_name = max(candidate_models, key=lambda name: score_candidate_model(name, train_rows))
-        model = build_income_pipeline(best_model_name)
+        best_model_name = "logistic_regression_sparse_sampled"
+        model = build_income_pipeline()
         model.fit([build_income_features(row) for row in train_rows], [str(row["income"]) for row in train_rows])
         predicted = [str(label) for label in model.predict([build_income_features(row) for row in test_rows])]
     actual = [str(row["income"]) for row in test_rows]
