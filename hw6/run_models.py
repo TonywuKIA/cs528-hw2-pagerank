@@ -67,6 +67,8 @@ def fetch_joined_requests() -> list[dict[str, object]]:
                 "requested_file": row[9],
                 "http_method": row[10],
                 "status_code": row[11],
+                "ip_prefix_8": extract_ip_prefix(client_ip, 1),
+                "ip_prefix_16": extract_ip_prefix(client_ip, 2),
                 "ip_prefix_24": extract_ip_prefix(client_ip),
             }
         )
@@ -74,12 +76,12 @@ def fetch_joined_requests() -> list[dict[str, object]]:
     return result
 
 
-def extract_ip_prefix(client_ip: object) -> str | None:
+def extract_ip_prefix(client_ip: object, octets: int = 3) -> str | None:
     if not client_ip or not isinstance(client_ip, str):
         return None
     parts = client_ip.split(".")
     if len(parts) == 4:
-        return ".".join(parts[:3])
+        return ".".join(parts[:octets])
     return client_ip
 
 
@@ -163,6 +165,8 @@ def run_ip_country_model(rows: list[dict[str, object]], output_dir: Path) -> dic
 
 def build_income_features(row: dict[str, object]) -> dict[str, str]:
     feature_names = [
+        "ip_prefix_8",
+        "ip_prefix_16",
         "ip_prefix_24",
         "country",
         "gender",
@@ -177,6 +181,9 @@ def build_income_features(row: dict[str, object]) -> dict[str, str]:
     for name in feature_names:
         value = row.get(name)
         features[name] = "unknown" if value is None else str(value)
+    features["country_age"] = f'{features["country"]}|{features["age"]}'
+    features["country_gender"] = f'{features["country"]}|{features["gender"]}'
+    features["age_gender"] = f'{features["age"]}|{features["gender"]}'
     return features
 
 
@@ -185,6 +192,7 @@ def build_income_pipeline() -> Pipeline:
         loss="log_loss",
         max_iter=1000,
         tol=1e-3,
+        class_weight="balanced",
         random_state=RANDOM_STATE,
     )
     return Pipeline(steps=[("vectorizer", DictVectorizer(sparse=True)), ("classifier", classifier)])
