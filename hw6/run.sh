@@ -19,6 +19,10 @@ MODEL_MACHINE_TYPE="${MODEL_MACHINE_TYPE:-e2-standard-4}"
 MODEL_SA_NAME="${MODEL_SA_NAME:-hw6-model-sa}"
 MODEL_SA_EMAIL="${MODEL_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 OUTPUT_PREFIX="${OUTPUT_PREFIX:-hw6}"
+MODEL_RANDOM_STATE="${MODEL_RANDOM_STATE:-123}"
+MAX_IP_COUNTRY_TEST_ROWS="${MAX_IP_COUNTRY_TEST_ROWS:-5000}"
+MAX_INCOME_TRAIN_ROWS="${MAX_INCOME_TRAIN_ROWS:-30000}"
+MAX_INCOME_TEST_ROWS="${MAX_INCOME_TEST_ROWS:-5000}"
 
 run_ssh_with_retry() {
   local remote_command="$1"
@@ -100,7 +104,7 @@ echo "[run] Applying 3NF schema and migrating data..."
 run_ssh_with_retry "cd /opt/hw6/app && export DB_HOST='${DB_HOST}' DB_PORT='${DB_PORT}' DB_NAME='${DB_NAME}' DB_USER='${DB_USER}' DB_PASS='${DB_PASS}' && /opt/hw6/venv/bin/python setup_3nf.py && /opt/hw6/venv/bin/python migrate_to_3nf.py" 6 10
 
 echo "[run] Training and evaluating models..."
-run_ssh_with_retry "cd /opt/hw6/app && export BUCKET_NAME='${BUCKET_NAME}' OUTPUT_PREFIX='${OUTPUT_PREFIX}' DB_HOST='${DB_HOST}' DB_PORT='${DB_PORT}' DB_NAME='${DB_NAME}' DB_USER='${DB_USER}' DB_PASS='${DB_PASS}' && /opt/hw6/venv/bin/python run_models.py" 6 10
+run_ssh_with_retry "cd /opt/hw6/app && export BUCKET_NAME='${BUCKET_NAME}' OUTPUT_PREFIX='${OUTPUT_PREFIX}' DB_HOST='${DB_HOST}' DB_PORT='${DB_PORT}' DB_NAME='${DB_NAME}' DB_USER='${DB_USER}' DB_PASS='${DB_PASS}' MODEL_RANDOM_STATE='${MODEL_RANDOM_STATE}' MAX_IP_COUNTRY_TEST_ROWS='${MAX_IP_COUNTRY_TEST_ROWS}' MAX_INCOME_TRAIN_ROWS='${MAX_INCOME_TRAIN_ROWS}' MAX_INCOME_TEST_ROWS='${MAX_INCOME_TEST_ROWS}' && /opt/hw6/venv/bin/python -u run_models.py" 6 10
 
 echo "[output] Metrics file:"
 gcloud storage cat "gs://${BUCKET_NAME}/${OUTPUT_PREFIX}/model_metrics.json"
