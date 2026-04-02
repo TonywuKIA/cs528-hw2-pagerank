@@ -184,13 +184,16 @@ def build_income_features(row: dict[str, object]) -> dict[str, str]:
     features["country_age"] = f'{features["country"]}|{features["age"]}'
     features["country_gender"] = f'{features["country"]}|{features["gender"]}'
     features["age_gender"] = f'{features["age"]}|{features["gender"]}'
+    features["country_time_of_day"] = f'{features["country"]}|{features["time_of_day"]}'
+    features["country_requested_file"] = f'{features["country"]}|{features["requested_file"]}'
+    features["age_time_of_day"] = f'{features["age"]}|{features["time_of_day"]}'
     return features
 
 
 def build_income_pipeline() -> Pipeline:
     classifier = SGDClassifier(
         loss="log_loss",
-        max_iter=1000,
+        max_iter=2000,
         tol=1e-3,
         class_weight="balanced",
         random_state=RANDOM_STATE,
