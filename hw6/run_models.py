@@ -1,5 +1,6 @@
 import json
 import os
+from collections import Counter
 from pathlib import Path
 
 from google.cloud import storage
@@ -122,10 +123,9 @@ def run_ip_country_model(rows: list[dict[str, object]], output_dir: Path) -> dic
         if row.get("client_ip") and row.get("country")
     }
     log_progress("ip_country_lookup_build_done", lookup_size=len(ip_country_lookup))
-    fallback_country = max(
-        (str(row["country"]) for row in train_rows if row.get("country")),
-        key=lambda country: sum(1 for row in train_rows if row.get("country") == country),
-    )
+    country_counts = Counter(str(row["country"]) for row in train_rows if row.get("country"))
+    fallback_country = country_counts.most_common(1)[0][0]
+    log_progress("ip_country_fallback_ready", fallback_country=fallback_country, distinct_countries=len(country_counts))
 
     predictions = []
     actual = []
