@@ -1,6 +1,6 @@
 # HW6 (3NF + ML on VM)
 
-This directory builds on the populated `hw5db` database from Homework 5.
+This directory builds on the populated PostgreSQL `hw5db` database from Homework 5.
 
 ## Files
 - `run.sh`: end-to-end automation that starts Cloud SQL, creates a VM, creates the 3NF schema, migrates data, runs both models, prints bucket outputs, deletes the VM, and stops the database
