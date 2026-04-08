@@ -121,6 +121,11 @@ def _format_record_tuple_expanded(name: str, count: int, kind: str) -> str:
     return format_count_record(name, count, kind)
 
 
+def _format_record_item(item: tuple[str, int], kind: str) -> str:
+    name, count = item
+    return _format_record_tuple_expanded(name, count, kind)
+
+
 def _sort_top_records(rows: list[tuple[str, int]]) -> list[tuple[str, int]]:
     return select_top_k(rows, limit=len(rows))
 
@@ -159,7 +164,7 @@ def build_pipeline(pipeline, input_pattern: str, output_prefix: str):
             | f"{label}TopFive" >> beam.combiners.Top.Of(5, key=_top_sort_key)
             | f"{label}SortTopFive" >> beam.Map(_sort_top_records)
             | f"{label}FlattenTopFive" >> beam.FlatMap(list)
-            | f"{label}FormatTopFive" >> beam.MapTuple(_format_record_tuple_expanded, kind)
+            | f"{label}FormatTopFive" >> beam.Map(_format_record_item, kind)
             | f"{label}WriteTopFive"
             >> WriteToText(
                 f"{output_prefix}/{kind}",
