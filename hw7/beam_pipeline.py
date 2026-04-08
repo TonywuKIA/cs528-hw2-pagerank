@@ -1,8 +1,11 @@
 import argparse
+import fnmatch
 import html
 import json
 import re
 import time
+from functools import lru_cache
+from glob import glob
 from pathlib import Path
 from typing import Iterable
 
@@ -85,9 +88,54 @@ def write_runtime_summary(path: str, content: str) -> None:
         handle.write(content.encode("utf-8"))
 
 
-def _read_match_content(readable_file) -> str:
-    data = readable_file.read_utf8()
-    return data if isinstance(data, str) else data.decode("utf-8", errors="ignore")
+def _split_gcs_pattern(input_pattern: str) -> tuple[str, str, str]:
+    without_scheme = input_pattern[len("gs://"):]
+    bucket_name, _, object_pattern = without_scheme.partition("/")
+    wildcard_index = len(object_pattern)
+    for marker in ("*", "?", "["):
+        index = object_pattern.find(marker)
+        if index != -1:
+            wildcard_index = min(wildcard_index, index)
+    prefix = object_pattern[:wildcard_index]
+    if "/" in prefix:
+        prefix = prefix[: prefix.rfind("/") + 1]
+    else:
+        prefix = ""
+    return bucket_name, prefix, object_pattern
+
+
+def list_input_paths(input_pattern: str) -> list[str]:
+    if input_pattern.startswith("gs://"):
+        from google.cloud import storage
+
+        bucket_name, prefix, object_pattern = _split_gcs_pattern(input_pattern)
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        matches: list[str] = []
+        for blob in bucket.list_blobs(prefix=prefix):
+            if fnmatch.fnmatch(blob.name, object_pattern):
+                matches.append(f"gs://{bucket_name}/{blob.name}")
+        return sorted(matches)
+
+    return sorted(glob(input_pattern))
+
+
+@lru_cache(maxsize=1)
+def _get_storage_client():
+    from google.cloud import storage
+
+    return storage.Client()
+
+
+def read_document_text(path: str) -> str:
+    if path.startswith("gs://"):
+        without_scheme = path[len("gs://"):]
+        bucket_name, _, object_name = without_scheme.partition("/")
+        bucket = _get_storage_client().bucket(bucket_name)
+        blob = bucket.blob(object_name)
+        return blob.download_as_text(encoding="utf-8")
+
+    return Path(path).read_text(encoding="utf-8", errors="ignore")
 
 
 def _to_incoming_pairs(parsed: dict[str, object]) -> Iterable[tuple[str, int]]:
@@ -105,7 +153,7 @@ def _to_outgoing_pair(parsed: dict[str, object]) -> tuple[str, int]:
 
 
 def _document_from_readable_file(readable_file) -> dict[str, object]:
-    return parse_document(readable_file.metadata.path, _read_match_content(readable_file))
+    return parse_document(readable_file, read_document_text(readable_file))
 
 
 def _top_sort_key(item: tuple[str, int]) -> tuple[int, str]:
@@ -132,12 +180,15 @@ def _sort_top_records(rows: list[tuple[str, int]]) -> list[tuple[str, int]]:
 
 def build_pipeline(pipeline, input_pattern: str, output_prefix: str):
     import apache_beam as beam
-    from apache_beam.io import WriteToText, fileio
+    from apache_beam.io import WriteToText
+
+    input_paths = list_input_paths(input_pattern)
+    if not input_paths:
+        raise RuntimeError(f"No input files matched pattern: {input_pattern}")
 
     documents = (
         pipeline
-        | "MatchFiles" >> fileio.MatchFiles(input_pattern)
-        | "ReadMatches" >> fileio.ReadMatches()
+        | "CreateInputPaths" >> beam.Create(input_paths)
         | "ParseDocuments" >> beam.Map(_document_from_readable_file)
     )
 
