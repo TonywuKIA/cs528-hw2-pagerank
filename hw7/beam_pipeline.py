@@ -7,6 +7,10 @@ import time
 from pathlib import Path
 from typing import Iterable
 
+import apache_beam as beam
+from apache_beam.io import WriteToText, fileio
+from apache_beam.options.pipeline_options import PipelineOptions
+
 DEFAULT_INPUT = "gs://cs528-hw2-chunyu/pages/*.html"
 DEFAULT_OUTPUT = "hw7/output/local"
 
@@ -25,7 +29,7 @@ def extract_outgoing_links(html_text: str) -> list[str]:
 
 def html_to_tokens(html_text: str) -> list[str]:
     # Piazza clarification:
-    # any sequence of letters, digits, or apostrophes counts as a word;
+    # any sequence of letters, digits, or apostrophes counts as a word.
     # everything else is a separator.
     unescaped = html.unescape(html_text).lower()
     return TOKEN_RE.findall(unescaped)
@@ -128,11 +132,12 @@ def _format_record_item(item: tuple[str, int], kind: str) -> str:
 
 def parse_gcs_pattern(gcs_pattern: str) -> tuple[str, str, str]:
     """
-    Convert e.g. gs://bucket/pages/*.html
-    into:
-      bucket = bucket
-      blob_pattern = pages/*.html
-      listing_prefix = pages/
+    Example:
+      gs://bucket/pages/*.html
+    returns:
+      bucket_name='bucket'
+      blob_pattern='pages/*.html'
+      listing_prefix='pages/'
     """
     if not gcs_pattern.startswith("gs://"):
         raise ValueError("This pipeline expects a gs://... input pattern.")
@@ -145,11 +150,14 @@ def parse_gcs_pattern(gcs_pattern: str) -> tuple[str, str, str]:
     bucket_name = without_scheme[:first_slash]
     blob_pattern = without_scheme[first_slash + 1 :]
 
-    wildcard_positions = [i for i in (
-        blob_pattern.find("*"),
-        blob_pattern.find("?"),
-        blob_pattern.find("["),
-    ) if i != -1]
+    wildcard_positions = [
+        i for i in (
+            blob_pattern.find("*"),
+            blob_pattern.find("?"),
+            blob_pattern.find("["),
+        )
+        if i != -1
+    ]
 
     if wildcard_positions:
         first_wildcard = min(wildcard_positions)
@@ -161,7 +169,7 @@ def parse_gcs_pattern(gcs_pattern: str) -> tuple[str, str, str]:
     return bucket_name, blob_pattern, listing_prefix
 
 
-class GenerateManifestDoFn:
+class GenerateManifestDoFn(beam.DoFn):
     def __init__(self, bucket_name: str, blob_pattern: str, listing_prefix: str, limit: int = 0):
         self.bucket_name = bucket_name
         self.blob_pattern = blob_pattern
@@ -189,9 +197,6 @@ class GenerateManifestDoFn:
 
 
 def build_pipeline(pipeline, input_pattern: str, output_prefix: str, tasks: str, manifest_limit: int):
-    import apache_beam as beam
-    from apache_beam.io import WriteToText, fileio
-
     bucket_name, blob_pattern, listing_prefix = parse_gcs_pattern(input_pattern)
 
     file_uris = (
@@ -280,9 +285,6 @@ def parse_args(argv: list[str] | None = None):
 
 def run(argv: list[str] | None = None) -> int:
     known_args, pipeline_args = parse_args(argv)
-
-    import apache_beam as beam
-    from apache_beam.options.pipeline_options import PipelineOptions
 
     options = PipelineOptions(pipeline_args)
     runner_name = known_args.runtime_runner or options.get_all_options().get("runner") or "DirectRunner"
