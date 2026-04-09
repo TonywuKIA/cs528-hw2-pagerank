@@ -62,11 +62,33 @@ bash hw7/run_local.sh
 Defaults:
 - input: `gs://cs528-hw2-chunyu/pages/*.html`
 - output base: `hw7/output/local/<timestamp>/`
+- tasks: `all`
+- manifest limit: `0` (no limit)
 
 Override example:
 
 ```bash
 INPUT_PATTERN="gs://cs528-hw2-chunyu/pages/*.html" OUTPUT_DIR="$(pwd)/hw7/output/local/manual-run" bash hw7/run_local.sh
+```
+
+Run only one task on a smaller subset:
+
+```bash
+TASKS="incoming" MANIFEST_LIMIT=10 OUTPUT_DIR="$(pwd)/hw7/output/incoming-10" bash hw7/run_local.sh
+```
+
+To validate smaller bucket subsets with DirectRunner, you can run the Python entrypoint directly:
+
+```bash
+python3 hw7/beam_pipeline.py \
+  --input "gs://cs528-hw2-chunyu/pages/*.html" \
+  --output "hw7/output/incoming-10" \
+  --tasks incoming \
+  --manifest-limit 10 \
+  --runtime-runner DirectRunner \
+  --runner DirectRunner \
+  --direct_running_mode=in_memory \
+  --direct_num_workers=1
 ```
 
 ## Dataflow run
