@@ -1,17 +1,14 @@
 import argparse
-import fnmatch
 import html
 import json
 import re
 import time
-from functools import lru_cache
-from glob import glob
 from pathlib import Path
 from typing import Iterable
 
-
 DEFAULT_INPUT = "gs://cs528-hw2-chunyu/pages/*.html"
 DEFAULT_OUTPUT = "hw7/output/local"
+
 HREF_RE = re.compile(r'href\s*=\s*["\'](\d+)\.html["\']', re.IGNORECASE)
 TOKEN_RE = re.compile(r"[a-z0-9']+", re.IGNORECASE)
 
@@ -21,8 +18,9 @@ def normalize_source_name(path: str) -> str:
     return normalized.rsplit("/", maxsplit=1)[-1]
 
 
-def extract_outgoing_links(html_text: str) -> list[str]:
-    return [f"{match}.html" for match in HREF_RE.findall(html_text)]
+def extract_outgoing_links(html_text: str) -> Iterable[str]:
+    for match in HREF_RE.findall(html_text):
+        yield f"{match}.html"
 
 
 def html_to_tokens(html_text: str) -> list[str]:
@@ -32,23 +30,10 @@ def html_to_tokens(html_text: str) -> list[str]:
     return TOKEN_RE.findall(unescaped)
 
 
-def build_bigrams(tokens: list[str]) -> list[str]:
-    return [f"{left} {right}" for left, right in zip(tokens, tokens[1:], strict=False)]
-
-
-def parse_document(path: str, html_text: str) -> dict[str, object]:
-    outgoing = extract_outgoing_links(html_text)
+def iter_bigrams_from_html(html_text: str) -> Iterable[str]:
     tokens = html_to_tokens(html_text)
-    return {
-        "source": normalize_source_name(path),
-        "outgoing": outgoing,
-        "outdegree": len(outgoing),
-        "bigrams": build_bigrams(tokens),
-    }
-
-
-def select_top_k(items: Iterable[tuple[str, int]], limit: int = 5) -> list[tuple[str, int]]:
-    return sorted(items, key=lambda item: (-item[1], item[0]))[:limit]
+    for left, right in zip(tokens, tokens[1:]):
+        yield f"{left} {right}"
 
 
 def format_count_record(name: str, count: int, kind: str) -> str:
@@ -88,123 +73,76 @@ def write_runtime_summary(path: str, content: str) -> None:
         handle.write(content.encode("utf-8"))
 
 
-def _split_gcs_pattern(input_pattern: str) -> tuple[str, str, str]:
-    without_scheme = input_pattern[len("gs://"):]
-    bucket_name, _, object_pattern = without_scheme.partition("/")
-    wildcard_index = len(object_pattern)
-    for marker in ("*", "?", "["):
-        index = object_pattern.find(marker)
-        if index != -1:
-            wildcard_index = min(wildcard_index, index)
-    prefix = object_pattern[:wildcard_index]
-    if "/" in prefix:
-        prefix = prefix[: prefix.rfind("/") + 1]
-    else:
-        prefix = ""
-    return bucket_name, prefix, object_pattern
+def _read_match_content(readable_file) -> str:
+    data = readable_file.read_utf8()
+    return data if isinstance(data, str) else data.decode("utf-8", errors="ignore")
 
 
-def list_input_paths(input_pattern: str) -> list[str]:
-    if input_pattern.startswith("gs://"):
-        from google.cloud import storage
-
-        bucket_name, prefix, object_pattern = _split_gcs_pattern(input_pattern)
-        client = storage.Client()
-        bucket = client.bucket(bucket_name)
-        matches: list[str] = []
-        for blob in bucket.list_blobs(prefix=prefix):
-            if fnmatch.fnmatch(blob.name, object_pattern):
-                matches.append(f"gs://{bucket_name}/{blob.name}")
-        return sorted(matches)
-
-    return sorted(glob(input_pattern))
+def _safe_read_file(readable_file) -> tuple[str, str]:
+    path = readable_file.metadata.path
+    try:
+        content = _read_match_content(readable_file)
+        return path, content
+    except Exception as e:
+        raise RuntimeError(f"Failed to read file {path}: {e}") from e
 
 
-@lru_cache(maxsize=1)
-def _get_storage_client():
-    from google.cloud import storage
-
-    return storage.Client()
-
-
-def read_document_text(path: str) -> str:
-    if path.startswith("gs://"):
-        without_scheme = path[len("gs://"):]
-        bucket_name, _, object_name = without_scheme.partition("/")
-        bucket = _get_storage_client().bucket(bucket_name)
-        blob = bucket.blob(object_name)
-        return blob.download_as_text(encoding="utf-8")
-
-    return Path(path).read_text(encoding="utf-8", errors="ignore")
+def _to_outgoing_pair(file_record: tuple[str, str]) -> tuple[str, int]:
+    path, html_text = file_record
+    source = normalize_source_name(path)
+    outdegree = sum(1 for _ in extract_outgoing_links(html_text))
+    return source, outdegree
 
 
-def _to_incoming_pairs(parsed: dict[str, object]) -> Iterable[tuple[str, int]]:
-    for target in parsed["outgoing"]:
-        yield (str(target), 1)
+def _to_incoming_pairs(file_record: tuple[str, str]) -> Iterable[tuple[str, int]]:
+    _, html_text = file_record
+    for target in extract_outgoing_links(html_text):
+        yield target, 1
 
 
-def _to_bigram_pairs(parsed: dict[str, object]) -> Iterable[tuple[str, int]]:
-    for bigram in parsed["bigrams"]:
-        yield (str(bigram), 1)
-
-
-def _to_outgoing_pair(parsed: dict[str, object]) -> tuple[str, int]:
-    return (str(parsed["source"]), int(parsed["outdegree"]))
-
-
-def _document_from_readable_file(readable_file) -> dict[str, object]:
-    return parse_document(readable_file, read_document_text(readable_file))
+def _to_bigram_pairs(file_record: tuple[str, str]) -> Iterable[tuple[str, int]]:
+    _, html_text = file_record
+    for bigram in iter_bigrams_from_html(html_text):
+        yield bigram, 1
 
 
 def _top_sort_key(item: tuple[str, int]) -> tuple[int, str]:
-    return (item[1], item[0])
+    return item[1], item[0]
 
 
-def _format_record_tuple(item: tuple[str, int], kind: str) -> str:
-    name, count = item
-    return format_count_record(name, count, kind)
-
-
-def _format_record_tuple_expanded(name: str, count: int, kind: str) -> str:
-    return format_count_record(name, count, kind)
+def _sort_rows_desc(rows: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    return sorted(rows, key=lambda item: (-item[1], item[0]))
 
 
 def _format_record_item(item: tuple[str, int], kind: str) -> str:
     name, count = item
-    return _format_record_tuple_expanded(name, count, kind)
-
-
-def _sort_top_records(rows: list[tuple[str, int]]) -> list[tuple[str, int]]:
-    return select_top_k(rows, limit=len(rows))
+    return format_count_record(name, count, kind)
 
 
 def build_pipeline(pipeline, input_pattern: str, output_prefix: str):
     import apache_beam as beam
-    from apache_beam.io import WriteToText
+    from apache_beam.io import WriteToText, fileio
 
-    input_paths = list_input_paths(input_pattern)
-    if not input_paths:
-        raise RuntimeError(f"No input files matched pattern: {input_pattern}")
-
-    documents = (
+    files = (
         pipeline
-        | "CreateInputPaths" >> beam.Create(input_paths)
-        | "ParseDocuments" >> beam.Map(_document_from_readable_file)
+        | "MatchFiles" >> fileio.MatchFiles(input_pattern)
+        | "ReadMatches" >> fileio.ReadMatches()
+        | "ReadFileContents" >> beam.Map(_safe_read_file)
     )
 
     incoming_counts = (
-        documents
+        files
         | "IncomingPairs" >> beam.FlatMap(_to_incoming_pairs)
         | "CountIncoming" >> beam.CombinePerKey(sum)
     )
 
     outgoing_counts = (
-        documents
+        files
         | "OutgoingPairs" >> beam.Map(_to_outgoing_pair)
     )
 
     bigram_counts = (
-        documents
+        files
         | "BigramPairs" >> beam.FlatMap(_to_bigram_pairs)
         | "CountBigrams" >> beam.CombinePerKey(sum)
     )
@@ -213,14 +151,14 @@ def build_pipeline(pipeline, input_pattern: str, output_prefix: str):
         (
             pcoll
             | f"{label}TopFive" >> beam.combiners.Top.Of(5, key=_top_sort_key)
-            | f"{label}SortTopFive" >> beam.Map(_sort_top_records)
-            | f"{label}FlattenTopFive" >> beam.FlatMap(list)
+            | f"{label}SortTopFive" >> beam.Map(_sort_rows_desc)
+            | f"{label}FlattenTopFive" >> beam.FlatMap(lambda rows: rows)
             | f"{label}FormatTopFive" >> beam.Map(_format_record_item, kind)
             | f"{label}WriteTopFive"
             >> WriteToText(
                 f"{output_prefix}/{kind}",
                 file_name_suffix=".jsonl",
-                shard_name_template="-SSSSS-of-NNNNN",
+                shard_name_template="-00000-of-00001",
                 num_shards=1,
             )
         )
