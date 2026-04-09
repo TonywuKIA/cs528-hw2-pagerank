@@ -4,16 +4,14 @@ import html
 import json
 import re
 import time
+from functools import lru_cache
+from glob import glob
 from pathlib import Path
 from typing import Iterable
 
-import apache_beam as beam
-from apache_beam.io import WriteToText, fileio
-from apache_beam.options.pipeline_options import PipelineOptions
 
 DEFAULT_INPUT = "gs://cs528-hw2-chunyu/pages/*.html"
 DEFAULT_OUTPUT = "hw7/output/local"
-
 HREF_RE = re.compile(r'href\s*=\s*["\'](\d+)\.html["\']', re.IGNORECASE)
 TOKEN_RE = re.compile(r"[a-z0-9']+", re.IGNORECASE)
 
@@ -28,15 +26,14 @@ def extract_outgoing_links(html_text: str) -> list[str]:
 
 
 def html_to_tokens(html_text: str) -> list[str]:
-    # Piazza clarification:
-    # any sequence of letters, digits, or apostrophes counts as a word.
-    # everything else is a separator.
+    # Piazza clarification: any sequence of letters, digits, or apostrophes counts as a word.
+    # Everything else acts as a separator, so HTML markup is tokenized rather than stripped.
     unescaped = html.unescape(html_text).lower()
     return TOKEN_RE.findall(unescaped)
 
 
 def build_bigrams(tokens: list[str]) -> list[str]:
-    return [f"{left} {right}" for left, right in zip(tokens, tokens[1:])]
+    return [f"{left} {right}" for left, right in zip(tokens, tokens[1:], strict=False)]
 
 
 def parse_document(path: str, html_text: str) -> dict[str, object]:
@@ -91,16 +88,54 @@ def write_runtime_summary(path: str, content: str) -> None:
         handle.write(content.encode("utf-8"))
 
 
-def _read_match_content(readable_file) -> str:
-    data = readable_file.read_utf8()
-    return data if isinstance(data, str) else data.decode("utf-8", errors="ignore")
+def _split_gcs_pattern(input_pattern: str) -> tuple[str, str, str]:
+    without_scheme = input_pattern[len("gs://"):]
+    bucket_name, _, object_pattern = without_scheme.partition("/")
+    wildcard_index = len(object_pattern)
+    for marker in ("*", "?", "["):
+        index = object_pattern.find(marker)
+        if index != -1:
+            wildcard_index = min(wildcard_index, index)
+    prefix = object_pattern[:wildcard_index]
+    if "/" in prefix:
+        prefix = prefix[: prefix.rfind("/") + 1]
+    else:
+        prefix = ""
+    return bucket_name, prefix, object_pattern
 
 
-def _document_from_readable_file(readable_file) -> dict[str, object]:
-    return parse_document(
-        readable_file.metadata.path,
-        _read_match_content(readable_file),
-    )
+def list_input_paths(input_pattern: str) -> list[str]:
+    if input_pattern.startswith("gs://"):
+        from google.cloud import storage
+
+        bucket_name, prefix, object_pattern = _split_gcs_pattern(input_pattern)
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        matches: list[str] = []
+        for blob in bucket.list_blobs(prefix=prefix):
+            if fnmatch.fnmatch(blob.name, object_pattern):
+                matches.append(f"gs://{bucket_name}/{blob.name}")
+        return sorted(matches)
+
+    return sorted(glob(input_pattern))
+
+
+@lru_cache(maxsize=1)
+def _get_storage_client():
+    from google.cloud import storage
+
+    return storage.Client()
+
+
+def read_document_text(path: str) -> str:
+    if path.startswith("gs://"):
+        without_scheme = path[len("gs://"):]
+        bucket_name, _, object_name = without_scheme.partition("/")
+        bucket = _get_storage_client().bucket(bucket_name)
+        blob = bucket.blob(object_name)
+        return blob.download_as_text(encoding="utf-8")
+
+    return Path(path).read_text(encoding="utf-8", errors="ignore")
 
 
 def _to_incoming_pairs(parsed: dict[str, object]) -> Iterable[tuple[str, int]]:
@@ -117,110 +152,62 @@ def _to_outgoing_pair(parsed: dict[str, object]) -> tuple[str, int]:
     return (str(parsed["source"]), int(parsed["outdegree"]))
 
 
+def _document_from_readable_file(readable_file) -> dict[str, object]:
+    return parse_document(readable_file, read_document_text(readable_file))
+
+
 def _top_sort_key(item: tuple[str, int]) -> tuple[int, str]:
     return (item[1], item[0])
 
 
-def _sort_top_records(rows: list[tuple[str, int]]) -> list[tuple[str, int]]:
-    return sorted(rows, key=lambda item: (-item[1], item[0]))
-
-
-def _format_record_item(item: tuple[str, int], kind: str) -> str:
+def _format_record_tuple(item: tuple[str, int], kind: str) -> str:
     name, count = item
     return format_count_record(name, count, kind)
 
 
-def parse_gcs_pattern(gcs_pattern: str) -> tuple[str, str, str]:
-    """
-    Example:
-      gs://bucket/pages/*.html
-    returns:
-      bucket_name='bucket'
-      blob_pattern='pages/*.html'
-      listing_prefix='pages/'
-    """
-    if not gcs_pattern.startswith("gs://"):
-        raise ValueError("This pipeline expects a gs://... input pattern.")
-
-    without_scheme = gcs_pattern[len("gs://") :]
-    first_slash = without_scheme.find("/")
-    if first_slash == -1:
-        raise ValueError("Input must include a bucket path, e.g. gs://bucket/pages/*.html")
-
-    bucket_name = without_scheme[:first_slash]
-    blob_pattern = without_scheme[first_slash + 1 :]
-
-    wildcard_positions = [
-        i for i in (
-            blob_pattern.find("*"),
-            blob_pattern.find("?"),
-            blob_pattern.find("["),
-        )
-        if i != -1
-    ]
-
-    if wildcard_positions:
-        first_wildcard = min(wildcard_positions)
-        prefix_candidate = blob_pattern[:first_wildcard]
-        listing_prefix = prefix_candidate.rsplit("/", 1)[0] + "/" if "/" in prefix_candidate else ""
-    else:
-        listing_prefix = blob_pattern.rsplit("/", 1)[0] + "/" if "/" in blob_pattern else ""
-
-    return bucket_name, blob_pattern, listing_prefix
+def _format_record_tuple_expanded(name: str, count: int, kind: str) -> str:
+    return format_count_record(name, count, kind)
 
 
-class GenerateManifestDoFn(beam.DoFn):
-    def __init__(self, bucket_name: str, blob_pattern: str, listing_prefix: str, limit: int = 0):
-        self.bucket_name = bucket_name
-        self.blob_pattern = blob_pattern
-        self.listing_prefix = listing_prefix
-        self.limit = limit
-
-    def process(self, _):
-        from google.cloud import storage
-
-        client = storage.Client()
-        bucket = client.bucket(self.bucket_name)
-
-        count = 0
-        for blob in bucket.list_blobs(prefix=self.listing_prefix):
-            if not blob.name.endswith(".html"):
-                continue
-            if not fnmatch.fnmatch(blob.name, self.blob_pattern):
-                continue
-
-            yield f"gs://{self.bucket_name}/{blob.name}"
-            count += 1
-
-            if self.limit > 0 and count >= self.limit:
-                break
+def _format_record_item(item: tuple[str, int], kind: str) -> str:
+    name, count = item
+    return _format_record_tuple_expanded(name, count, kind)
 
 
-def build_pipeline(pipeline, input_pattern: str, output_prefix: str, tasks: str, manifest_limit: int):
-    bucket_name, blob_pattern, listing_prefix = parse_gcs_pattern(input_pattern)
+def _sort_top_records(rows: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    return select_top_k(rows, limit=len(rows))
 
-    file_uris = (
-        pipeline
-        | "CreateManifestSeed" >> beam.Create([None])
-        | "GenerateManifest"
-        >> beam.ParDo(
-            GenerateManifestDoFn(
-                bucket_name=bucket_name,
-                blob_pattern=blob_pattern,
-                listing_prefix=listing_prefix,
-                limit=manifest_limit,
-            )
-        )
-    )
+
+def build_pipeline(pipeline, input_pattern: str, output_prefix: str):
+    import apache_beam as beam
+    from apache_beam.io import WriteToText
+
+    input_paths = list_input_paths(input_pattern)
+    if not input_paths:
+        raise RuntimeError(f"No input files matched pattern: {input_pattern}")
 
     documents = (
-        file_uris
-        | "MatchListedFiles" >> fileio.MatchAll()
-        | "ReadListedFiles" >> fileio.ReadMatches()
+        pipeline
+        | "CreateInputPaths" >> beam.Create(input_paths)
         | "ParseDocuments" >> beam.Map(_document_from_readable_file)
     )
 
-    normalized_tasks = tasks.lower().strip()
+    incoming_counts = (
+        documents
+        | "IncomingPairs" >> beam.FlatMap(_to_incoming_pairs)
+        | "CountIncoming" >> beam.CombinePerKey(sum)
+    )
+
+    outgoing_counts = (
+        documents
+        | "OutgoingPairs" >> beam.Map(_to_outgoing_pair)
+    )
+
+    bigram_counts = (
+        documents
+        | "BigramPairs" >> beam.FlatMap(_to_bigram_pairs)
+        | "CountBigrams" >> beam.CombinePerKey(sum)
+    )
 
     def write_top_five(pcoll, label: str, kind: str):
         (
@@ -238,47 +225,16 @@ def build_pipeline(pipeline, input_pattern: str, output_prefix: str, tasks: str,
             )
         )
 
-    if normalized_tasks in {"all", "incoming"}:
-        incoming_counts = (
-            documents
-            | "IncomingPairs" >> beam.FlatMap(_to_incoming_pairs)
-            | "CountIncoming" >> beam.CombinePerKey(sum)
-        )
-        write_top_five(incoming_counts, "Incoming", "top_incoming_links")
-
-    if normalized_tasks in {"all", "outgoing"}:
-        outgoing_counts = (
-            documents
-            | "OutgoingPairs" >> beam.Map(_to_outgoing_pair)
-        )
-        write_top_five(outgoing_counts, "Outgoing", "top_outgoing_links")
-
-    if normalized_tasks in {"all", "bigrams"}:
-        bigram_counts = (
-            documents
-            | "BigramPairs" >> beam.FlatMap(_to_bigram_pairs)
-            | "CountBigrams" >> beam.CombinePerKey(sum)
-        )
-        write_top_five(bigram_counts, "Bigrams", "top_bigrams")
+    write_top_five(incoming_counts, "Incoming", "top_incoming_links")
+    write_top_five(outgoing_counts, "Outgoing", "top_outgoing_links")
+    write_top_five(bigram_counts, "Bigrams", "top_bigrams")
 
 
 def parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="HW7 Apache Beam analytics on HW2 pages")
-    parser.add_argument("--input", default=DEFAULT_INPUT, help="GCS file pattern to process")
+    parser.add_argument("--input", default=DEFAULT_INPUT, help="File pattern to process")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="Output directory or bucket prefix")
     parser.add_argument("--runtime-runner", default="", help="Runner name to record in runtime summary")
-    parser.add_argument(
-        "--tasks",
-        default="all",
-        choices=["all", "incoming", "outgoing", "bigrams"],
-        help="Which task(s) to run",
-    )
-    parser.add_argument(
-        "--manifest-limit",
-        type=int,
-        default=0,
-        help="Limit number of matched files for debugging; 0 means no limit",
-    )
     known_args, pipeline_args = parser.parse_known_args(argv)
     return known_args, pipeline_args
 
@@ -286,18 +242,15 @@ def parse_args(argv: list[str] | None = None):
 def run(argv: list[str] | None = None) -> int:
     known_args, pipeline_args = parse_args(argv)
 
+    import apache_beam as beam
+    from apache_beam.options.pipeline_options import PipelineOptions
+
     options = PipelineOptions(pipeline_args)
     runner_name = known_args.runtime_runner or options.get_all_options().get("runner") or "DirectRunner"
     runtime_started = time.perf_counter()
 
     with beam.Pipeline(options=options) as pipeline:
-        build_pipeline(
-            pipeline=pipeline,
-            input_pattern=known_args.input,
-            output_prefix=known_args.output,
-            tasks=known_args.tasks,
-            manifest_limit=known_args.manifest_limit,
-        )
+        build_pipeline(pipeline, known_args.input, known_args.output)
 
     runtime_seconds = time.perf_counter() - runtime_started
     runtime_summary = format_runtime_summary(
