@@ -7,6 +7,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 INPUT_PATTERN="${INPUT_PATTERN:-gs://cs528-hw2-chunyu/pages/*.html}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/hw7/output/local/${RUN_ID}}"
+TASKS="${TASKS:-all}"
+MANIFEST_LIMIT="${MANIFEST_LIMIT:-0}"
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -27,9 +29,13 @@ START_TS="$(date +%s)"
 "${PYTHON_CMD[@]}" "${SCRIPT_DIR}/beam_pipeline.py" \
   --input "${INPUT_PATTERN}" \
   --output "${OUTPUT_DIR}" \
+  --tasks "${TASKS}" \
+  --manifest-limit "${MANIFEST_LIMIT}" \
   --runtime-runner "DirectRunner" \
   --runner=DirectRunner
 END_TS="$(date +%s)"
 
 echo "Local wall-clock runtime: $((END_TS - START_TS))s"
 echo "Output directory: ${OUTPUT_DIR}"
+echo "Tasks: ${TASKS}"
+echo "Manifest limit: ${MANIFEST_LIMIT}"
