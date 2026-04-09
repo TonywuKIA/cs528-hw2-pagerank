@@ -1,4 +1,5 @@
 import argparse
+import fnmatch
 import html
 import json
 import re
@@ -23,8 +24,9 @@ def extract_outgoing_links(html_text: str) -> list[str]:
 
 
 def html_to_tokens(html_text: str) -> list[str]:
-    # Piazza clarification: any sequence of letters, digits, or apostrophes counts as a word.
-    # Everything else acts as a separator, so HTML markup is tokenized rather than stripped.
+    # Piazza clarification:
+    # any sequence of letters, digits, or apostrophes counts as a word;
+    # everything else is a separator.
     unescaped = html.unescape(html_text).lower()
     return TOKEN_RE.findall(unescaped)
 
@@ -91,9 +93,6 @@ def _read_match_content(readable_file) -> str:
 
 
 def _document_from_readable_file(readable_file) -> dict[str, object]:
-    # IMPORTANT:
-    # Do NOT manually re-download from GCS with google-cloud-storage.
-    # Read directly from Beam's readable_file object returned by ReadMatches().
     return parse_document(
         readable_file.metadata.path,
         _read_match_content(readable_file),
@@ -115,9 +114,6 @@ def _to_outgoing_pair(parsed: dict[str, object]) -> tuple[str, int]:
 
 
 def _top_sort_key(item: tuple[str, int]) -> tuple[int, str]:
-    # Beam Top.Of keeps the "largest" by this key.
-    # Since we want highest count first and then alphabetical tie-break,
-    # this key is enough; we re-sort the final top 5 for clean output order.
     return (item[1], item[0])
 
 
@@ -130,33 +126,96 @@ def _format_record_item(item: tuple[str, int], kind: str) -> str:
     return format_count_record(name, count, kind)
 
 
-def build_pipeline(pipeline, input_pattern: str, output_prefix: str, tasks: str):
+def parse_gcs_pattern(gcs_pattern: str) -> tuple[str, str, str]:
+    """
+    Convert e.g. gs://bucket/pages/*.html
+    into:
+      bucket = bucket
+      blob_pattern = pages/*.html
+      listing_prefix = pages/
+    """
+    if not gcs_pattern.startswith("gs://"):
+        raise ValueError("This pipeline expects a gs://... input pattern.")
+
+    without_scheme = gcs_pattern[len("gs://") :]
+    first_slash = without_scheme.find("/")
+    if first_slash == -1:
+        raise ValueError("Input must include a bucket path, e.g. gs://bucket/pages/*.html")
+
+    bucket_name = without_scheme[:first_slash]
+    blob_pattern = without_scheme[first_slash + 1 :]
+
+    wildcard_positions = [i for i in (
+        blob_pattern.find("*"),
+        blob_pattern.find("?"),
+        blob_pattern.find("["),
+    ) if i != -1]
+
+    if wildcard_positions:
+        first_wildcard = min(wildcard_positions)
+        prefix_candidate = blob_pattern[:first_wildcard]
+        listing_prefix = prefix_candidate.rsplit("/", 1)[0] + "/" if "/" in prefix_candidate else ""
+    else:
+        listing_prefix = blob_pattern.rsplit("/", 1)[0] + "/" if "/" in blob_pattern else ""
+
+    return bucket_name, blob_pattern, listing_prefix
+
+
+class GenerateManifestDoFn:
+    def __init__(self, bucket_name: str, blob_pattern: str, listing_prefix: str, limit: int = 0):
+        self.bucket_name = bucket_name
+        self.blob_pattern = blob_pattern
+        self.listing_prefix = listing_prefix
+        self.limit = limit
+
+    def process(self, _):
+        from google.cloud import storage
+
+        client = storage.Client()
+        bucket = client.bucket(self.bucket_name)
+
+        count = 0
+        for blob in bucket.list_blobs(prefix=self.listing_prefix):
+            if not blob.name.endswith(".html"):
+                continue
+            if not fnmatch.fnmatch(blob.name, self.blob_pattern):
+                continue
+
+            yield f"gs://{self.bucket_name}/{blob.name}"
+            count += 1
+
+            if self.limit > 0 and count >= self.limit:
+                break
+
+
+def build_pipeline(pipeline, input_pattern: str, output_prefix: str, tasks: str, manifest_limit: int):
     import apache_beam as beam
     from apache_beam.io import WriteToText, fileio
 
-    documents = (
+    bucket_name, blob_pattern, listing_prefix = parse_gcs_pattern(input_pattern)
+
+    file_uris = (
         pipeline
-        | "MatchFiles" >> fileio.MatchFiles(input_pattern)
-        | "ReadMatches" >> fileio.ReadMatches()
+        | "CreateManifestSeed" >> beam.Create([None])
+        | "GenerateManifest"
+        >> beam.ParDo(
+            GenerateManifestDoFn(
+                bucket_name=bucket_name,
+                blob_pattern=blob_pattern,
+                listing_prefix=listing_prefix,
+                limit=manifest_limit,
+            )
+        )
+    )
+
+    documents = (
+        file_uris
+        | "MatchListedFiles" >> fileio.MatchAll()
+        | "ReadListedFiles" >> fileio.ReadMatches()
         | "ParseDocuments" >> beam.Map(_document_from_readable_file)
     )
 
-    incoming_counts = (
-        documents
-        | "IncomingPairs" >> beam.FlatMap(_to_incoming_pairs)
-        | "CountIncoming" >> beam.CombinePerKey(sum)
-    )
-
-    outgoing_counts = (
-        documents
-        | "OutgoingPairs" >> beam.Map(_to_outgoing_pair)
-    )
-
-    bigram_counts = (
-        documents
-        | "BigramPairs" >> beam.FlatMap(_to_bigram_pairs)
-        | "CountBigrams" >> beam.CombinePerKey(sum)
-    )
+    normalized_tasks = tasks.lower().strip()
 
     def write_top_five(pcoll, label: str, kind: str):
         (
@@ -174,21 +233,33 @@ def build_pipeline(pipeline, input_pattern: str, output_prefix: str, tasks: str)
             )
         )
 
-    normalized_tasks = tasks.lower().strip()
-
     if normalized_tasks in {"all", "incoming"}:
+        incoming_counts = (
+            documents
+            | "IncomingPairs" >> beam.FlatMap(_to_incoming_pairs)
+            | "CountIncoming" >> beam.CombinePerKey(sum)
+        )
         write_top_five(incoming_counts, "Incoming", "top_incoming_links")
 
     if normalized_tasks in {"all", "outgoing"}:
+        outgoing_counts = (
+            documents
+            | "OutgoingPairs" >> beam.Map(_to_outgoing_pair)
+        )
         write_top_five(outgoing_counts, "Outgoing", "top_outgoing_links")
 
     if normalized_tasks in {"all", "bigrams"}:
+        bigram_counts = (
+            documents
+            | "BigramPairs" >> beam.FlatMap(_to_bigram_pairs)
+            | "CountBigrams" >> beam.CombinePerKey(sum)
+        )
         write_top_five(bigram_counts, "Bigrams", "top_bigrams")
 
 
 def parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="HW7 Apache Beam analytics on HW2 pages")
-    parser.add_argument("--input", default=DEFAULT_INPUT, help="File pattern to process")
+    parser.add_argument("--input", default=DEFAULT_INPUT, help="GCS file pattern to process")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="Output directory or bucket prefix")
     parser.add_argument("--runtime-runner", default="", help="Runner name to record in runtime summary")
     parser.add_argument(
@@ -196,6 +267,12 @@ def parse_args(argv: list[str] | None = None):
         default="all",
         choices=["all", "incoming", "outgoing", "bigrams"],
         help="Which task(s) to run",
+    )
+    parser.add_argument(
+        "--manifest-limit",
+        type=int,
+        default=0,
+        help="Limit number of matched files for debugging; 0 means no limit",
     )
     known_args, pipeline_args = parser.parse_known_args(argv)
     return known_args, pipeline_args
@@ -217,6 +294,7 @@ def run(argv: list[str] | None = None) -> int:
             input_pattern=known_args.input,
             output_prefix=known_args.output,
             tasks=known_args.tasks,
+            manifest_limit=known_args.manifest_limit,
         )
 
     runtime_seconds = time.perf_counter() - runtime_started
