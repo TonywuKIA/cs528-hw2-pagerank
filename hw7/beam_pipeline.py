@@ -12,6 +12,11 @@ from typing import Iterable
 
 DEFAULT_INPUT = "gs://cs528-hw2-chunyu/pages/*.html"
 DEFAULT_OUTPUT = "hw7/output/local"
+TASK_INCOMING = "incoming"
+TASK_OUTGOING = "outgoing"
+TASK_BIGRAMS = "bigrams"
+TASK_ALL = "all"
+TASK_CHOICES = (TASK_ALL, TASK_INCOMING, TASK_OUTGOING, TASK_BIGRAMS)
 HREF_RE = re.compile(r'href\s*=\s*["\'](\d+)\.html["\']', re.IGNORECASE)
 TOKEN_RE = re.compile(r"[a-z0-9']+", re.IGNORECASE)
 
@@ -104,7 +109,7 @@ def _split_gcs_pattern(input_pattern: str) -> tuple[str, str, str]:
     return bucket_name, prefix, object_pattern
 
 
-def list_input_paths(input_pattern: str) -> list[str]:
+def list_input_paths(input_pattern: str, manifest_limit: int = 0) -> list[str]:
     if input_pattern.startswith("gs://"):
         from google.cloud import storage
 
@@ -115,9 +120,15 @@ def list_input_paths(input_pattern: str) -> list[str]:
         for blob in bucket.list_blobs(prefix=prefix):
             if fnmatch.fnmatch(blob.name, object_pattern):
                 matches.append(f"gs://{bucket_name}/{blob.name}")
-        return sorted(matches)
+        matches = sorted(matches)
+        if manifest_limit > 0:
+            return matches[:manifest_limit]
+        return matches
 
-    return sorted(glob(input_pattern))
+    matches = sorted(glob(input_pattern))
+    if manifest_limit > 0:
+        return matches[:manifest_limit]
+    return matches
 
 
 @lru_cache(maxsize=1)
@@ -178,11 +189,21 @@ def _sort_top_records(rows: list[tuple[str, int]]) -> list[tuple[str, int]]:
     return select_top_k(rows, limit=len(rows))
 
 
-def build_pipeline(pipeline, input_pattern: str, output_prefix: str):
+def _task_selected(selected_tasks: set[str], task_name: str) -> bool:
+    return TASK_ALL in selected_tasks or task_name in selected_tasks
+
+
+def build_pipeline(
+    pipeline,
+    input_pattern: str,
+    output_prefix: str,
+    selected_tasks: set[str],
+    manifest_limit: int,
+):
     import apache_beam as beam
     from apache_beam.io import WriteToText
 
-    input_paths = list_input_paths(input_pattern)
+    input_paths = list_input_paths(input_pattern, manifest_limit=manifest_limit)
     if not input_paths:
         raise RuntimeError(f"No input files matched pattern: {input_pattern}")
 
@@ -190,23 +211,6 @@ def build_pipeline(pipeline, input_pattern: str, output_prefix: str):
         pipeline
         | "CreateInputPaths" >> beam.Create(input_paths)
         | "ParseDocuments" >> beam.Map(_document_from_readable_file)
-    )
-
-    incoming_counts = (
-        documents
-        | "IncomingPairs" >> beam.FlatMap(_to_incoming_pairs)
-        | "CountIncoming" >> beam.CombinePerKey(sum)
-    )
-
-    outgoing_counts = (
-        documents
-        | "OutgoingPairs" >> beam.Map(_to_outgoing_pair)
-    )
-
-    bigram_counts = (
-        documents
-        | "BigramPairs" >> beam.FlatMap(_to_bigram_pairs)
-        | "CountBigrams" >> beam.CombinePerKey(sum)
     )
 
     def write_top_five(pcoll, label: str, kind: str):
@@ -225,15 +229,47 @@ def build_pipeline(pipeline, input_pattern: str, output_prefix: str):
             )
         )
 
-    write_top_five(incoming_counts, "Incoming", "top_incoming_links")
-    write_top_five(outgoing_counts, "Outgoing", "top_outgoing_links")
-    write_top_five(bigram_counts, "Bigrams", "top_bigrams")
+    if _task_selected(selected_tasks, TASK_INCOMING):
+        incoming_counts = (
+            documents
+            | "IncomingPairs" >> beam.FlatMap(_to_incoming_pairs)
+            | "CountIncoming" >> beam.CombinePerKey(sum)
+        )
+        write_top_five(incoming_counts, "Incoming", "top_incoming_links")
+
+    if _task_selected(selected_tasks, TASK_OUTGOING):
+        outgoing_counts = (
+            documents
+            | "OutgoingPairs" >> beam.Map(_to_outgoing_pair)
+        )
+        write_top_five(outgoing_counts, "Outgoing", "top_outgoing_links")
+
+    if _task_selected(selected_tasks, TASK_BIGRAMS):
+        bigram_counts = (
+            documents
+            | "BigramPairs" >> beam.FlatMap(_to_bigram_pairs)
+            | "CountBigrams" >> beam.CombinePerKey(sum)
+        )
+        write_top_five(bigram_counts, "Bigrams", "top_bigrams")
 
 
 def parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="HW7 Apache Beam analytics on HW2 pages")
     parser.add_argument("--input", default=DEFAULT_INPUT, help="File pattern to process")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="Output directory or bucket prefix")
+    parser.add_argument(
+        "--tasks",
+        nargs="+",
+        default=[TASK_ALL],
+        choices=TASK_CHOICES,
+        help="Which analytics to run: all, incoming, outgoing, bigrams",
+    )
+    parser.add_argument(
+        "--manifest-limit",
+        type=int,
+        default=0,
+        help="Optional limit on how many matched files to include from the input manifest",
+    )
     parser.add_argument("--runtime-runner", default="", help="Runner name to record in runtime summary")
     known_args, pipeline_args = parser.parse_known_args(argv)
     return known_args, pipeline_args
@@ -248,9 +284,16 @@ def run(argv: list[str] | None = None) -> int:
     options = PipelineOptions(pipeline_args)
     runner_name = known_args.runtime_runner or options.get_all_options().get("runner") or "DirectRunner"
     runtime_started = time.perf_counter()
+    selected_tasks = set(known_args.tasks)
 
     with beam.Pipeline(options=options) as pipeline:
-        build_pipeline(pipeline, known_args.input, known_args.output)
+        build_pipeline(
+            pipeline,
+            known_args.input,
+            known_args.output,
+            selected_tasks=selected_tasks,
+            manifest_limit=known_args.manifest_limit,
+        )
 
     runtime_seconds = time.perf_counter() - runtime_started
     runtime_summary = format_runtime_summary(
